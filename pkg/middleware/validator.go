@@ -10,7 +10,6 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"io/ioutil"
-	"log"
 	"net/http"
 )
 
@@ -18,7 +17,7 @@ const (
 	KeyTypeRSA = "RSA"
 )
 
-// ExtractToken knows how to extract a JWT token from the Authorization header of a *gin.Context
+// ExtractToken knows how to extract an authentication token from the Authorization header of a *gin.Context
 func ExtractToken(c *gin.Context) string {
 	authenticationHeader := c.GetHeader("authorization")
 	if authenticationHeader == "" {
@@ -31,7 +30,7 @@ func ExtractToken(c *gin.Context) string {
 }
 
 // ValidateToken validates a raw JWT token based on provider data
-func ValidateToken(providerData ProviderData, encodedToken string) (*jwt.Token, error) {
+func ValidateToken(providerData DiscoveryDocument, encodedToken string) (*jwt.Token, error) {
 	claims := jwt.MapClaims{}
 	claims["iss"] = providerData.Issuer
 
@@ -73,42 +72,6 @@ func ValidateToken(providerData ProviderData, encodedToken string) (*jwt.Token, 
 	return token, nil
 }
 
-// JWTValidationMiddleware validates authorization header bearer JWT tokens and adds a "user" to the *gin.Context
-func JWTValidationMiddleware(discovery_url string) gin.HandlerFunc {
-	providerData, err := FetchProviderData(discovery_url)
-	if err != nil {
-		log.Panic("Could not fetch required provider data for JWT validation", err)
-	}
-
-	return func(c *gin.Context) {
-		encodedToken := ExtractToken(c)
-
-		validToken, err := ValidateToken(providerData, encodedToken)
-		if err != nil {
-			fmt.Printf("error validating token: %s\n", err)
-
-			c.AbortWithStatus(401)
-		} else {
-			c.Set("user", validToken)
-
-			c.Next()
-		}
-	}
-}
-
-type ProviderData struct {
-	Issuer string `json:"issuer"`
-	JWKSURL string `json:"jwks_uri"`
-	Algorithms []string `json:"id_token_signing_alg_values_supported"`
-	keys JWKSResponse
-}
-
-type Key struct {
-	KeyID string `json:"kid"`
-	KeyType string `json:"kty"`
-	CertificateChain []string `json:"x5c"`
-}
-
 func (key *Key) getCertificate() string {
 	return key.CertificateChain[0]
 }
@@ -127,7 +90,7 @@ func (response *JWKSResponse) getKey(keyID string) (Key, error) {
 	return Key{}, fmt.Errorf("unable to find key with ID %s", keyID)
 }
 
-func (providerData *ProviderData) getCertificate(keyID string) (interface{}, error) {
+func (providerData *DiscoveryDocument) getCertificate(keyID string) (interface{}, error) {
 	key, err := providerData.keys.getKey(keyID)
 	if err != nil {
 		return "", nil
@@ -152,12 +115,15 @@ func (providerData *ProviderData) getCertificate(keyID string) (interface{}, err
 	return certificate, nil
 }
 
-func fetchKeyMap(providerData *ProviderData) error{
-	resp, err := http.Get(providerData.JWKSURL)
+func fetchKeyMap(discoveryDocument *DiscoveryDocument) error {
+	resp, err := http.Get(discoveryDocument.JWKSURL)
 	if err != nil {
 		return fmt.Errorf("could not get jwks_uri: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -170,20 +136,23 @@ func fetchKeyMap(providerData *ProviderData) error{
 		return fmt.Errorf("error unmashaling body: %w", err)
 	}
 
-	providerData.keys = jwksResponse
+	discoveryDocument.keys = jwksResponse
 
 	return nil
 }
 
-// FetchProviderData extracts necessary information for token validation from a discovery endpoint
-func FetchProviderData(discoveryUrl string)  (ProviderData, error) {
-	providerData := ProviderData{}
+// FetchDiscoveryDocument extracts necessary information for token validation from a discovery endpoint
+func FetchDiscoveryDocument(discoveryUrl string) (DiscoveryDocument, error) {
+	providerData := DiscoveryDocument{}
 
 	resp, err := http.Get(discoveryUrl)
 	if err != nil {
 		return providerData, fmt.Errorf("could not get %s: %w", discoveryUrl, err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
